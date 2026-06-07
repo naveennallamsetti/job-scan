@@ -1,19 +1,14 @@
 import threading
 import time
 import os
-from datetime import datetime, timedelta
+import logging
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from backend.database import get_db_connection, save_job, add_log, update_job_status, update_job_details
-from backend.fetcher import fetch_all_jobs, generate_tailored_documents, check_url_is_expired
+from backend.fetcher import fetch_all_jobs, check_url_is_expired
 
 def safe_print(msg):
-    try:
-        print(msg)
-    except UnicodeEncodeError:
-        try:
-            print(str(msg).encode('ascii', 'replace').decode('ascii'))
-        except Exception:
-            pass
+    logging.info(msg)
 
 # Scheduler control states
 scheduler_thread = None
@@ -33,59 +28,37 @@ def scan_jobs(portal_to_scan=None):
     if not portal_to_scan:
         last_scan_time = datetime.now()
         next_scan_time = last_scan_time + timedelta(minutes=30)
-        print("[SCHEDULER] Starting 30-minute job crawl...")
+        logging.info("[SCHEDULER] Starting automated 30-minute job crawl...")
         add_log("scrape", "Starting automated 30-minute scan across configured portals...")
     else:
-        print(f"[SCHEDULER] Starting targeted crawl for '{portal_to_scan}'...")
+        logging.info(f"[SCHEDULER] Starting manual targeted crawl for '{portal_to_scan}'...")
         add_log("scrape", f"Starting manual targeted scan for '{portal_to_scan}'...")
     
-    jobs = fetch_all_jobs(portal_to_scan)
-    new_jobs_count = 0
-    
-    # Check against database for duplicates
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    for job in jobs:
-        cursor.execute("SELECT id FROM jobs WHERE id = ?", (job["id"],))
-        exists = cursor.fetchone()
+    # Run fetcher with single scan state manager mapping
+    stats = fetch_all_jobs(portal_to_scan)
+    if "error" in stats:
+        logging.warning(f"[SCHEDULER] Automated scan skipped: {stats['error']}")
+        return
         
-        if not exists:
-            # Generate tailored docs right away for the new job
-            cl, res = generate_tailored_documents(job)
-            job["cover_letter"] = cl
-            job["resume_customized"] = res
-            save_job(job)
-            new_jobs_count += 1
-            add_log("scrape", f"New job: {job['title']} @ {job['company']} ({job['match_score']}% match) found on {job['portal']}")
-        else:
-            # Update existing
-            save_job(job)
-            
-    conn.close()
-    
-    portal_log_name = portal_to_scan if portal_to_scan else "all portals"
-    add_log("scrape", f"Crawl complete for {portal_log_name}. Discovered {new_jobs_count} new matching jobs.")
-    print(f"[SCHEDULER] Job crawl complete. Discovered {new_jobs_count} new jobs.")
+    new_jobs_count = stats.get("jobs_found", 0)
+    logging.info(f"[SCHEDULER] Job crawl complete. Discovered/Updated {new_jobs_count} jobs.")
 
 def verify_stored_jobs_freshness():
     global last_verify_time, next_verify_time
     last_verify_time = datetime.now()
     next_verify_time = last_verify_time + timedelta(minutes=60)
     
-    print("[SCHEDULER] Starting background stored jobs freshness check...")
-    add_log("database", "Starting automated parallel freshness check of stored job URLs...")
+    logging.info("[SCHEDULER] Starting background stored jobs lifecycle verification...")
+    add_log("database", "Starting automated lifecycle status sweep of stored job listings...")
     
+    # 1. URL Validation Sweep for Active Jobs
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, title, company, url, portal FROM jobs WHERE applied = 0")
+    cursor.execute("SELECT id, title, company, url, portal FROM jobs WHERE status = 'active'")
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     
-    from backend.fetcher import check_url_is_expired, is_older_than_30_days
-    
     expired_count = 0
-    updated_count = 0
     checked_count = 0
     
     def check_job(job):
@@ -95,16 +68,14 @@ def verify_stored_jobs_freshness():
         url = job["url"]
         portal = job["portal"]
         
-        job_dict = {"posted_ago": None}
         try:
-            is_expired = check_url_is_expired(url, job_dict)
+            is_expired = check_url_is_expired(url)
             return {
                 "id": job_id,
                 "title": title,
                 "company": company,
                 "portal": portal,
-                "is_expired": is_expired,
-                "new_posted_ago": job_dict.get("posted_ago")
+                "is_expired": is_expired
             }
         except Exception as e:
             return {
@@ -113,99 +84,102 @@ def verify_stored_jobs_freshness():
                 "company": company,
                 "portal": portal,
                 "is_expired": False,
-                "new_posted_ago": None,
                 "error": str(e)
             }
 
-    # Run checks in parallel using ThreadPoolExecutor
+    # Run URL checks in parallel
     results = []
-    max_workers = 25
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(check_job, row): row for row in rows}
         for future in as_completed(futures):
             res = future.result()
             results.append(res)
             checked_count += 1
             if checked_count % 50 == 0:
-                print(f"[SCHEDULER] Checked {checked_count}/{len(rows)} URLs...")
+                logging.info(f"[SCHEDULER] Checked {checked_count}/{len(rows)} URLs...")
                 
-    # Now process results in the database using a single transaction
+    # Update expired statuses
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     for res in results:
-        job_id = res["id"]
-        title = res["title"]
-        company = res["company"]
-        portal = res["portal"]
-        is_expired = res["is_expired"]
-        new_posted_ago = res["new_posted_ago"]
-        
-        if is_expired:
-            cursor.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        if res["is_expired"]:
+            cursor.execute("UPDATE jobs SET status = 'expired' WHERE id = ?", (res["id"],))
             expired_count += 1
-            if expired_count <= 25: # Cap detailed logs to prevent bloat
+            if expired_count <= 25:
                 cursor.execute(
                     "INSERT INTO logs (timestamp, type, description, status) VALUES (?, ?, ?, ?)",
-                    (datetime.now().strftime("%H:%M:%S"), "database", f"Purged expired listing: {title} @ {company} ({portal})", "warning")
+                    (datetime.now().strftime("%H:%M:%S"), "database", f"Listing marked expired (invalid URL): {res['title']} @ {res['company']} ({res['portal']})", "warning")
                 )
-                safe_print(f"[SCHEDULER] Purged expired listing: {title} @ {company} ({portal})")
-        elif new_posted_ago:
-            if is_older_than_30_days(new_posted_ago):
-                cursor.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
-                expired_count += 1
-                if expired_count <= 25:
-                    cursor.execute(
-                        "INSERT INTO logs (timestamp, type, description, status) VALUES (?, ?, ?, ?)",
-                        (datetime.now().strftime("%H:%M:%S"), "database", f"Purged dynamically aged-out listing (>30 days): {title} @ {company} ({portal})", "warning")
-                    )
-                    safe_print(f"[SCHEDULER] Purged aged-out listing: {title} @ {company} ({portal}) - {new_posted_ago}")
-            else:
-                cursor.execute("UPDATE jobs SET posted_ago = ? WHERE id = ?", (new_posted_ago, job_id))
-                updated_count += 1
-                if updated_count <= 25:
-                    safe_print(f"[SCHEDULER] Updated posting age for {title} @ {company}: {new_posted_ago}")
-                    
-    # Write final summaries
-    now_str = datetime.now().strftime("%H:%M:%S")
-    cursor.execute(
-        "INSERT INTO logs (timestamp, type, description, status) VALUES (?, ?, ?, ?)",
-        (now_str, "database", f"Parallel freshness sweep complete. Checked {checked_count} URLs, purged {expired_count} expired/stale listings, updated {updated_count} ages.", "success")
-    )
     conn.commit()
     conn.close()
     
-    safe_print(f"[SCHEDULER] Parallel freshness sweep complete. Checked {checked_count} URLs, purged {expired_count} expired/stale listings, updated {updated_count} ages.")
+    # 2. Lifecycle transitions (Archived and Deleted)
+    # archived -> first_seen older than 30 days
+    # deleted -> first_seen older than 90 days
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    now_dt = datetime.now()
+    cursor.execute("SELECT id, first_seen, status, title, company FROM jobs")
+    all_jobs = cursor.fetchall()
+    
+    archived_count = 0
+    deleted_count = 0
+    
+    for row in all_jobs:
+        jid = row["id"]
+        fs_str = row["first_seen"]
+        status = row["status"]
+        title = row["title"]
+        company = row["company"]
+        
+        if fs_str:
+            try:
+                # parse datetime
+                dt_str = fs_str.split(".")[0]
+                dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S")
+                delta_days = (now_dt - dt).days
+                
+                if delta_days > 90:
+                    cursor.execute("DELETE FROM jobs WHERE id = ?", (jid,))
+                    deleted_count += 1
+                elif delta_days > 30 and status != "archived":
+                    cursor.execute("UPDATE jobs SET status = 'archived' WHERE id = ?", (jid,))
+                    archived_count += 1
+            except Exception as e:
+                pass
+                
+    conn.commit()
+    conn.close()
+    
+    logging.info(f"[SCHEDULER] Lifecycle sweep complete. Checked {checked_count} URLs, expired {expired_count}, archived {archived_count}, deleted {deleted_count} older than 90 days.")
+    add_log("database", f"Lifecycle sweep complete. Expired {expired_count} invalid URLs, archived {archived_count} old listings, deleted {deleted_count} stale listings (>90 days).")
 
 def run_auto_apply():
     global last_apply_time, next_apply_time
     last_apply_time = datetime.now()
     next_apply_time = last_apply_time + timedelta(minutes=30)
     
-    print("[SCHEDULER] Starting 30-minute auto-apply cycle...")
+    logging.info("[SCHEDULER] Starting 30-minute auto-apply cycle...")
     
-    # Find unapplied jobs with match score >= 85%
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM jobs WHERE applied = 0 AND match_score >= 85 ORDER BY match_score DESC LIMIT 1")
+    cursor.execute("SELECT * FROM jobs WHERE applied = 0 AND status = 'active' AND match_score >= 85 ORDER BY match_score DESC LIMIT 1")
     row = cursor.fetchone()
     conn.close()
     
     if row:
         job = dict(row)
-        # Tailor documents if not already done
+        from backend.fetchers.base import generate_tailored_documents
         cl, res = generate_tailored_documents(job)
         update_job_details(job["id"], cl, res)
-        
-        # Update applied status
         update_job_status(job["id"], "applied", True)
         
-        # Add detailed apply log
         add_log("apply", f"Auto-applied: {job['title']} @ {job['company']} via {job['portal']}. Resume and cover letter uploaded.")
-        safe_print(f"[SCHEDULER] Auto-applied: {job['title']} @ {job['company']}")
+        logging.info(f"[SCHEDULER] Auto-applied: {job['title']} @ {job['company']}")
     else:
-        add_log("apply", "Auto-apply cycle executed. No new jobs above 85% match threshold to apply.", "success")
-        print("[SCHEDULER] Auto-apply cycle executed. No eligible jobs found.")
+        add_log("apply", "Auto-apply cycle executed. No new active jobs above 85% match threshold.", "success")
+        logging.info("[SCHEDULER] Auto-apply cycle completed. No active eligible jobs found.")
 
 def scheduler_loop():
     global is_running, next_scan_time, next_apply_time, next_verify_time
@@ -223,7 +197,7 @@ def scheduler_loop():
             try:
                 scan_jobs()
             except Exception as e:
-                print(f"Error during scan_jobs: {e}")
+                logging.error(f"Error during scan_jobs: {e}")
                 add_log("scrape", f"Crawl failed: {e}", "failed")
                 next_scan_time = datetime.now() + timedelta(minutes=30)
                 
@@ -232,7 +206,7 @@ def scheduler_loop():
             try:
                 run_auto_apply()
             except Exception as e:
-                print(f"Error during run_auto_apply: {e}")
+                logging.error(f"Error during run_auto_apply: {e}")
                 add_log("apply", f"Auto-apply failed: {e}", "failed")
                 next_apply_time = datetime.now() + timedelta(minutes=30)
                 
@@ -241,7 +215,7 @@ def scheduler_loop():
             try:
                 verify_stored_jobs_freshness()
             except Exception as e:
-                print(f"Error during verify_stored_jobs_freshness: {e}")
+                logging.error(f"Error during verify_stored_jobs_freshness: {e}")
                 add_log("database", f"Freshness sweep failed: {e}", "failed")
                 next_verify_time = datetime.now() + timedelta(minutes=60)
                 
@@ -253,9 +227,9 @@ def start_scheduler():
         is_running = True
         scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
         scheduler_thread.start()
-        print("[SCHEDULER] Background daemon thread started.")
+        logging.info("[SCHEDULER] Background daemon thread started.")
 
 def stop_scheduler():
     global is_running
     is_running = False
-    print("[SCHEDULER] Stopping background daemon...")
+    logging.info("[SCHEDULER] Stopping background daemon...")

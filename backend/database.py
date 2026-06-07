@@ -1,20 +1,33 @@
 import sqlite3
 import os
 import json
+import hashlib
+import re
 from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "jobs.db")
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+    except Exception:
+        pass
     return conn
 
-def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def generate_job_hash(title, company, location):
+    # Normalize title: lowercase, remove non-alphanumeric, strip whitespace
+    t = re.sub(r'[^a-zA-Z0-9]', '', str(title).lower())
+    # Normalize company: lowercase, remove non-alphanumeric, strip whitespace
+    c = re.sub(r'[^a-zA-Z0-9]', '', str(company).lower())
+    # Normalize location: lowercase, remove non-alphanumeric, strip whitespace
+    l = re.sub(r'[^a-zA-Z0-9]', '', str(location or '').lower())
     
-    # Create jobs table
+    hash_input = f"{t}|{c}|{l}".encode('utf-8')
+    return hashlib.sha256(hash_input).hexdigest()
+
+def create_jobs_table(cursor):
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY,
@@ -33,10 +46,132 @@ def init_db():
         experience_required TEXT,
         cover_letter TEXT,
         resume_customized TEXT,
-        created_at TEXT
+        created_at TEXT,
+        first_seen TEXT,
+        last_seen TEXT,
+        posted_date TEXT,
+        job_url TEXT,
+        job_hash TEXT,
+        status TEXT DEFAULT 'active',
+        resume_hash TEXT,
+        UNIQUE(job_url),
+        UNIQUE(job_hash)
+    )
+    """)
+
+def seed_default_portals(cursor):
+    all_portals = [
+        "LinkedIn Jobs", "Naukri.com", "Indeed", "Glassdoor Jobs", "Dice",
+        "We Work Remotely", "Remotive", "Remote OK", "Wellfound (AngelList)",
+        "Foundit (formerly Monster India)", "TimesJobs", "Shine", "Freshersworld",
+        "Cutshort", "Hirect", "Instahyre", "IIMJobs", "Hirist", "ZipRecruiter",
+        "CareerBuilder", "SimplyHired", "FlexJobs", "Working Nomads", "DevOps Jobs",
+        "Cloud Careers Hub", "Linux Foundation Jobs", "CNCF Job Board"
+    ]
+    for p in all_portals:
+        cursor.execute("""
+        INSERT OR IGNORE INTO portal_scans (portal, jobs_found, last_scan_time, status, duration, error_message)
+        VALUES (?, 0, NULL, 'idle', 0.0, NULL)
+        """, (p,))
+
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # 1. Create scan_history table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS scan_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_id TEXT UNIQUE,
+        started_at TEXT,
+        completed_at TEXT,
+        jobs_found INTEGER DEFAULT 0,
+        duplicates INTEGER DEFAULT 0,
+        failed_portals TEXT
     )
     """)
     
+    # 2. Check if jobs table exists and verify its schema
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='jobs'")
+    table_exists = cursor.fetchone()
+    
+    if table_exists:
+        # Check if job_hash column is in the table
+        cursor.execute("PRAGMA table_info(jobs)")
+        cols = [r[1] for r in cursor.fetchall()]
+        
+        need_migration = False
+        required_cols = ["job_hash", "first_seen", "last_seen", "status", "resume_hash"]
+        for rc in required_cols:
+            if rc not in cols:
+                need_migration = True
+                break
+                
+        if need_migration:
+            print("[DATABASE] Migrating jobs table to add production-grade columns and unique constraints...")
+            cursor.execute("ALTER TABLE jobs RENAME TO jobs_old")
+            
+            # Create new table with final schema
+            create_jobs_table(cursor)
+            
+            # Copy data from jobs_old to jobs
+            cursor.execute("SELECT * FROM jobs_old")
+            old_rows = cursor.fetchall()
+            for row in old_rows:
+                r_dict = dict(row)
+                
+                # Generate unique hash for old jobs
+                h = generate_job_hash(r_dict.get("title", ""), r_dict.get("company", ""), r_dict.get("location", ""))
+                
+                created = r_dict.get("created_at") or datetime.now().isoformat()
+                first = r_dict.get("first_seen") or created
+                last = r_dict.get("last_seen") or created
+                status = r_dict.get("status") or "active"
+                
+                try:
+                    cursor.execute("""
+                    INSERT OR IGNORE INTO jobs (
+                        id, title, company, location, portal, posted_ago, salary, match_score, 
+                        tags, description, url, applied, saved, experience_required, 
+                        cover_letter, resume_customized, created_at, first_seen, last_seen, 
+                        posted_date, job_url, job_hash, status, resume_hash
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        r_dict.get("id"),
+                        r_dict.get("title"),
+                        r_dict.get("company"),
+                        r_dict.get("location"),
+                        r_dict.get("portal"),
+                        r_dict.get("posted_ago"),
+                        r_dict.get("salary", "N/A"),
+                        r_dict.get("match_score", 70),
+                        r_dict.get("tags", ""),
+                        r_dict.get("description", ""),
+                        r_dict.get("url"),
+                        r_dict.get("applied", 0),
+                        r_dict.get("saved", 0),
+                        r_dict.get("experience_required", "3+ Years"),
+                        r_dict.get("cover_letter", ""),
+                        r_dict.get("resume_customized", ""),
+                        created,
+                        first,
+                        last,
+                        r_dict.get("posted_date") or r_dict.get("created_at"),
+                        r_dict.get("job_url") or r_dict.get("url"),
+                        h,
+                        status,
+                        r_dict.get("resume_hash")
+                    ))
+                except Exception as e:
+                    print(f"[DATABASE] Migration row error: {e}")
+                    
+            cursor.execute("DROP TABLE jobs_old")
+            print("[DATABASE] Jobs table migration completed successfully.")
+    else:
+        # Create jobs table from scratch
+        create_jobs_table(cursor)
+        
     # Create logs table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS logs (
@@ -59,24 +194,16 @@ def init_db():
         error_message TEXT
     )
     """)
-
-    # Seed default portals if they don't exist
-    all_portals = [
-        "LinkedIn Jobs", "Naukri.com", "Indeed", "Glassdoor Jobs", "Dice",
-        "We Work Remotely", "Remotive", "Remote OK", "Wellfound (AngelList)",
-        "Foundit (formerly Monster India)", "TimesJobs", "Shine", "Freshersworld",
-        "Cutshort", "Hirect", "Instahyre", "IIMJobs", "Hirist", "ZipRecruiter",
-        "CareerBuilder", "SimplyHired", "FlexJobs", "Working Nomads", "DevOps Jobs",
-        "Cloud Careers Hub", "Linux Foundation Jobs", "CNCF Job Board"
-    ]
-    for p in all_portals:
-        cursor.execute("""
-        INSERT OR IGNORE INTO portal_scans (portal, jobs_found, last_scan_time, status, duration, error_message)
-        VALUES (?, 0, NULL, 'idle', 0.0, NULL)
-        """, (p,))
+    
+    # Seed default portals
+    seed_default_portals(cursor)
     
     conn.commit()
     conn.close()
+    
+    # Create logs directory
+    log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+    os.makedirs(log_dir, exist_ok=True)
     purge_simulated_jobs()
 
 def purge_simulated_jobs():
@@ -107,8 +234,8 @@ def purge_simulated_jobs():
         conn.commit()
         deleted_count = cursor.rowcount
         
-        # Now dynamically purge based on age limits (older than 30 days)
-        cursor.execute("SELECT id, posted_ago, created_at FROM jobs")
+        # Dynamically purge based on age limits (older than 30 days)
+        cursor.execute("SELECT id, posted_ago, created_at, first_seen FROM jobs")
         rows = cursor.fetchall()
         
         from backend.fetcher import is_older_than_30_days
@@ -118,16 +245,18 @@ def purge_simulated_jobs():
             job_id = r["id"]
             posted_ago = r["posted_ago"]
             created_at = r["created_at"]
+            first_seen = r["first_seen"]
             
             # Check if posted_ago is older than 30 days
-            if is_older_than_30_days(posted_ago):
+            if posted_ago and is_older_than_30_days(posted_ago):
                 to_delete.append(job_id)
                 continue
                 
-            # Also check if created_at (crawl time) is older than 30 days
-            if created_at:
+            # Check if created_at or first_seen is older than 30 days
+            ref_date = first_seen or created_at
+            if ref_date:
                 try:
-                    dt_str = created_at.split(".")[0]
+                    dt_str = ref_date.split(".")[0]
                     dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S")
                     if (datetime.now() - dt).days > 30:
                         to_delete.append(job_id)
@@ -138,9 +267,8 @@ def purge_simulated_jobs():
             cursor.executemany("DELETE FROM jobs WHERE id = ?", [(jid,) for jid in to_delete])
             conn.commit()
             deleted_count += len(to_delete)
-            print(f"[DATABASE] Dynamically purged {len(to_delete)} jobs older than 30 days.")
             
-        print(f"[DATABASE] Purged legacy simulated and broken links from jobs database. Rows deleted: {deleted_count}")
+        print(f"[DATABASE] Purged simulated and aged-out links. Rows deleted: {deleted_count}")
         
         now_str = datetime.now().strftime("%H:%M:%S")
         cursor.execute(
@@ -182,7 +310,6 @@ def get_all_jobs():
     jobs = []
     for r in rows:
         job = dict(r)
-        # Convert applied and saved to boolean
         job["applied"] = bool(job["applied"])
         job["saved"] = bool(job["saved"])
         job["match"] = job["match_score"]
@@ -192,18 +319,16 @@ def get_all_jobs():
         job["company_name"] = job["company"]
         job["position"] = job["title"]
         job["job_portal"] = job["portal"]
-        if job["created_at"]:
-            try:
-                job["applied_date"] = job["created_at"].split("T")[0]
-            except:
-                job["applied_date"] = datetime.now().strftime("%Y-%m-%d")
-        else:
+        
+        ref_date = job.get("first_seen") or job.get("created_at") or datetime.now().isoformat()
+        try:
+            job["applied_date"] = ref_date.split("T")[0]
+        except:
             job["applied_date"] = datetime.now().strftime("%Y-%m-%d")
             
         job["status"] = "Applied"
         job["notes"] = f"Auto-applied. Match Score: {job['match']}%" if job["applied"] else ""
         
-        # Parse tags from comma-separated string to list
         if job["tags"]:
             job["tags"] = [t.strip() for t in job["tags"].split(",") if t.strip()]
         else:
@@ -211,47 +336,165 @@ def get_all_jobs():
         jobs.append(job)
     return jobs
 
-def save_job(job_data):
-    conn = get_db_connection()
+def save_job(job_data, conn=None):
+    import sqlite3
+    from datetime import datetime, timezone
+    
+    should_close = False
+    if conn is None:
+        conn = get_db_connection()
+        should_close = True
+        
     cursor = conn.cursor()
-    
-    tags_str = ",".join(job_data.get("tags", []))
+    tags_str = ",".join(job_data.get("tags", [])) if isinstance(job_data.get("tags"), list) else job_data.get("tags", "")
     now_str = datetime.now().isoformat()
+    posted_date = job_data.get("posted_date")
+    job_url = job_data.get("job_url") or job_data.get("url") or None
     
-    try:
-        cursor.execute("""
-        INSERT INTO jobs (id, title, company, location, portal, posted_ago, salary, match_score, tags, description, url, applied, saved, experience_required, cover_letter, resume_customized, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            posted_ago=excluded.posted_ago,
-            match_score=excluded.match_score,
-            tags=excluded.tags,
-            description=excluded.description,
-            salary=excluded.salary
-        """, (
-            job_data["id"],
-            job_data["title"],
-            job_data["company"],
-            job_data["location"],
-            job_data["portal"],
-            job_data["posted_ago"],
-            job_data.get("salary", "N/A"),
-            job_data.get("match_score", 70),
-            tags_str,
-            job_data["description"],
-            job_data["url"],
-            1 if job_data.get("applied", False) else 0,
-            1 if job_data.get("saved", False) else 0,
-            job_data.get("experience_required", "3+ Years"),
-            job_data.get("cover_letter", ""),
-            job_data.get("resume_customized", ""),
-            now_str
-        ))
-        conn.commit()
-    except Exception as e:
-        print(f"Error saving job: {e}")
-    finally:
-        conn.close()
+    # Generate job hash
+    job_hash = job_data.get("job_hash")
+    if not job_hash:
+        job_hash = generate_job_hash(job_data["title"], job_data["company"], job_data.get("location", ""))
+        job_data["job_hash"] = job_hash
+        
+    resume_content = job_data.get("resume_customized") or ""
+    res_hash = hashlib.sha256(resume_content.encode('utf-8')).hexdigest() if resume_content else ""
+    
+    # Check if job already exists
+    cursor.execute("SELECT id, description, resume_hash, match_score, cover_letter, resume_customized FROM jobs WHERE job_hash = ? OR job_url = ?", (job_hash, job_url))
+    row = cursor.fetchone()
+    
+    cl = job_data.get("cover_letter") or ""
+    res = job_data.get("resume_customized") or ""
+    match_score = job_data.get("match_score", 70)
+    
+    if row:
+        existing_id = row[0]
+        existing_desc = row[1]
+        existing_res_hash = row[2]
+        existing_match = row[3]
+        existing_cl = row[4]
+        existing_res = row[5]
+        
+        desc_changed = (job_data["description"] != existing_desc)
+        res_changed = (res_hash != existing_res_hash) if resume_content else False
+        
+        if not desc_changed and not res_changed and existing_match:
+            try:
+                cursor.execute("""
+                UPDATE jobs SET
+                    posted_ago = ?,
+                    last_seen = ?,
+                    status = 'active'
+                WHERE id = ?
+                """, (job_data["posted_ago"], now_str, existing_id))
+                if should_close:
+                    conn.commit()
+                return "duplicate"
+            except sqlite3.IntegrityError:
+                if should_close:
+                    conn.rollback()
+                return "duplicate"
+        else:
+            if not cl or not res:
+                from backend.fetchers.base import generate_tailored_documents
+                try:
+                    cl, res = generate_tailored_documents(job_data)
+                    res_hash = hashlib.sha256(res.encode('utf-8')).hexdigest()
+                except Exception:
+                    pass
+            from backend.fetchers.base import calculate_match_score
+            match_score, _ = calculate_match_score(job_data["title"], job_data["description"], [])
+            
+        try:
+            cursor.execute("""
+            UPDATE jobs SET
+                posted_ago = ?,
+                posted_date = ?,
+                last_seen = ?,
+                description = ?,
+                salary = ?,
+                tags = ?,
+                match_score = ?,
+                resume_hash = ?,
+                cover_letter = ?,
+                resume_customized = ?,
+                status = 'active'
+            WHERE id = ?
+            """, (
+                job_data["posted_ago"],
+                posted_date,
+                now_str,
+                job_data["description"],
+                job_data.get("salary", "N/A"),
+                tags_str,
+                match_score,
+                res_hash,
+                cl,
+                res,
+                existing_id
+            ))
+            if should_close:
+                conn.commit()
+            return "updated"
+        except sqlite3.IntegrityError:
+            if should_close:
+                conn.rollback()
+            return "duplicate"
+    else:
+        if not cl or not res:
+            from backend.fetchers.base import generate_tailored_documents
+            try:
+                cl, res = generate_tailored_documents(job_data)
+                res_hash = hashlib.sha256(res.encode('utf-8')).hexdigest()
+            except Exception:
+                pass
+                
+        try:
+            cursor.execute("""
+            INSERT INTO jobs (
+                id, title, company, location, portal, posted_ago, salary, match_score, 
+                tags, description, url, applied, saved, experience_required, 
+                cover_letter, resume_customized, created_at, first_seen, last_seen, 
+                posted_date, job_url, job_hash, status, resume_hash
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                job_data["id"],
+                job_data["title"],
+                job_data["company"],
+                job_data["location"],
+                job_data["portal"],
+                job_data["posted_ago"],
+                job_data.get("salary", "N/A"),
+                match_score,
+                tags_str,
+                job_data["description"],
+                job_data["url"],
+                1 if job_data.get("applied") else 0,
+                1 if job_data.get("saved") else 0,
+                job_data.get("experience_required", "3+ Years"),
+                cl,
+                res,
+                now_str,
+                now_str,
+                now_str,
+                posted_date,
+                job_url,
+                job_hash,
+                "active",
+                res_hash
+            ))
+            if should_close:
+                conn.commit()
+            return "inserted"
+        except sqlite3.IntegrityError:
+            if should_close:
+                conn.rollback()
+            return "duplicate"
+        finally:
+            if should_close:
+                conn.close()
 
 def update_job_status(job_id, field, value):
     conn = get_db_connection()
@@ -319,13 +562,62 @@ def get_portal_summaries():
         LEFT JOIN (
             SELECT portal, COUNT(*) as cnt 
             FROM jobs 
+            WHERE status = 'active'
             GROUP BY portal
         ) j ON ps.portal = j.portal
         """)
         rows = cursor.fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["jobs"] = d["jobs_found"]
+            d["total"] = d["jobs_found"]
+            result.append(d)
+        return result
     except Exception as e:
         print(f"Error getting portal summaries: {e}")
+        return []
+    finally:
+        conn.close()
+
+def add_scan_history(scan_id, started_at, completed_at, jobs_found, duplicates, failed_portals):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if isinstance(failed_portals, list):
+            failed_portals_str = ",".join(failed_portals)
+        else:
+            failed_portals_str = str(failed_portals or "")
+            
+        cursor.execute("""
+        INSERT INTO scan_history (scan_id, started_at, completed_at, jobs_found, duplicates, failed_portals)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (scan_id, started_at, completed_at, jobs_found, duplicates, failed_portals_str))
+        conn.commit()
+    except Exception as e:
+        print(f"[DATABASE] Error adding scan history: {e}")
+    finally:
+        conn.close()
+
+def get_scan_history(limit=10):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT scan_id, started_at, completed_at, jobs_found, duplicates, failed_portals FROM scan_history ORDER BY id DESC LIMIT ?", (limit,))
+        rows = cursor.fetchall()
+        return [
+            {
+                "scan_id": r[0],
+                "started_at": r[1],
+                "completed_at": r[2],
+                "jobs_found": r[3],
+                "duplicates": r[4],
+                "failed_portals": r[5].split(",") if r[5] else []
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"[DATABASE] Error getting scan history: {e}")
         return []
     finally:
         conn.close()

@@ -5,29 +5,7 @@ const API_BASE = "http://" + (typeof window !== "undefined" ? window.location.ho
 // ─── MOCK DATA ────────────────────────────────────────────────────────────────
 const MOCK_USER = { full_name: "Naveen Kumar", role: "AWS DevOps Engineer", experience: "3.8 Years", email: "naveendevops589@gmail.com" };
 
-const MOCK_JOBS = [
-  { id: 1, company_name: "Lloyds Banking Group", position: "AWS DevOps Engineer", job_portal: "LinkedIn", applied_date: "2024-03-10", status: "Technical Round 2", notes: "YOKRA referral" },
-  { id: 2, company_name: "Zurich Insurance", position: "Cloud Automation Consultant", job_portal: "Naukri", applied_date: "2024-03-14", status: "Manager Round", notes: "KRIFY referral" },
-  { id: 3, company_name: "TCS Client", position: "Lead DevOps Specialist", job_portal: "Naukri", applied_date: "2024-03-18", status: "Applied", notes: "" },
-  { id: 4, company_name: "HSBC Tech", position: "Site Reliability Engineer", job_portal: "LinkedIn", applied_date: "2024-03-20", status: "Screening", notes: "AWS focus" },
-  { id: 5, company_name: "Barclays Capital", position: "DevOps Platform Lead", job_portal: "LinkedIn", applied_date: "2024-03-22", status: "Applied", notes: "K8s heavy role" },
-];
-
-// ─── LIVE JOB FEED DATA (Simulated real listings) ───────────────────────────
-const LIVE_JOB_POOL = [
-  { id: "lj1", title: "Senior AWS DevOps Engineer", company: "Deutsche Bank", location: "Hyderabad, India (Hybrid)", portal: "LinkedIn", postedAgo: "2h ago", salary: "₹18-28 LPA", match: 97, tags: ["AWS", "EKS", "Terraform", "Jenkins"], description: "Looking for a Senior DevOps Engineer to manage EKS clusters, CI/CD pipelines using Jenkins, and infrastructure automation with Terraform. IRSA and multi-region deployments required.", url: "https://linkedin.com/jobs", applied: false, saved: false },
-  { id: "lj2", title: "DevOps / SRE Lead", company: "HSBC Technology", location: "Hyderabad, India (On-site)", portal: "Naukri", postedAgo: "4h ago", salary: "₹20-32 LPA", match: 94, tags: ["Kubernetes", "AWS", "Prometheus", "Ansible"], description: "SRE Lead role requiring Kubernetes cluster management, AWS infrastructure, Prometheus/Grafana monitoring stacks, and Ansible automation playbooks.", url: "https://naukri.com/jobs", applied: false, saved: false },
-  { id: "lj3", title: "Cloud Automation Engineer", company: "Standard Chartered", location: "Chennai, India (Hybrid)", portal: "LinkedIn", postedAgo: "6h ago", salary: "₹15-24 LPA", match: 91, tags: ["AWS", "Terraform", "Docker", "Jenkins"], description: "Cloud automation focused role. Terraform IaC, AWS services (EC2, VPC, RDS, S3), Docker containerisation, and Jenkins pipeline management.", url: "https://linkedin.com/jobs", applied: false, saved: false },
-  { id: "lj4", title: "Kubernetes Platform Engineer", company: "Capgemini", location: "Bangalore, India (Remote)", portal: "Indeed", postedAgo: "8h ago", salary: "₹14-22 LPA", match: 88, tags: ["Kubernetes", "Helm", "AWS", "Terraform"], description: "Platform engineering role with heavy Kubernetes focus. Helm chart development, EKS management, Terraform modules for AWS resources.", url: "https://indeed.com/jobs", applied: false, saved: false },
-  { id: "lj5", title: "AWS Infrastructure Lead", company: "Wipro Technologies", location: "Hyderabad, India (Hybrid)", portal: "Naukri", postedAgo: "12h ago", salary: "₹16-26 LPA", match: 86, tags: ["AWS", "CloudFormation", "Ansible", "Linux"], description: "Lead engineer for AWS cloud infrastructure. CloudFormation templates, Ansible configuration management, Linux server administration, VPC design.", url: "https://naukri.com/jobs", applied: false, saved: false },
-  { id: "lj6", title: "DevOps Engineer – FinTech", company: "Razorpay", location: "Bangalore, India (Hybrid)", portal: "LinkedIn", postedAgo: "1d ago", salary: "₹18-30 LPA", match: 85, tags: ["Kubernetes", "AWS", "Jenkins", "Terraform"], description: "FinTech DevOps role at high-growth startup. Kubernetes on EKS, Jenkins CI/CD, Terraform IaC, monitoring with Prometheus and Grafana.", url: "https://linkedin.com/jobs", applied: false, saved: false },
-  { id: "lj7", title: "Senior Site Reliability Engineer", company: "Amazon (AWS)", location: "Hyderabad, India (Hybrid)", portal: "LinkedIn", postedAgo: "1d ago", salary: "₹30-50 LPA", match: 83, tags: ["AWS", "Kubernetes", "Python", "Terraform"], description: "SRE at Amazon Web Services. Deep AWS expertise required, Kubernetes orchestration, Python scripting for automation, Terraform for IaC.", url: "https://linkedin.com/jobs", applied: false, saved: false },
-  { id: "lj8", title: "Cloud DevOps Consultant", company: "Deloitte India", location: "Mumbai, India (Hybrid)", portal: "Glassdoor", postedAgo: "2d ago", salary: "₹20-35 LPA", match: 81, tags: ["AWS", "Terraform", "Ansible", "DevSecOps"], description: "Consulting role requiring AWS architecture, Terraform automation, Ansible playbooks, and DevSecOps practices for banking clients.", url: "https://glassdoor.com/jobs", applied: false, saved: false },
-  { id: "lj9", title: "Platform & Infra Engineer", company: "Freshworks", location: "Chennai, India (Remote)", portal: "Indeed", postedAgo: "2d ago", salary: "₹14-20 LPA", match: 78, tags: ["Kubernetes", "AWS", "Prometheus", "Docker"], description: "Infrastructure engineering at product company. Kubernetes cluster operations, AWS cost optimisation, monitoring with Prometheus stack.", url: "https://indeed.com/jobs", applied: false, saved: false },
-  { id: "lj10", title: "Lead DevOps Engineer", company: "Accenture", location: "Hyderabad, India (Hybrid)", portal: "Naukri", postedAgo: "3d ago", salary: "₹18-28 LPA", match: 76, tags: ["AWS", "Jenkins", "Docker", "Linux"], description: "Lead DevOps role for banking client projects. Jenkins pipelines, AWS services management, Docker containerisation, Linux administration.", url: "https://naukri.com/jobs", applied: false, saved: false },
-  { id: "lj11", title: "Infrastructure Automation Engineer", company: "Infosys BPM", location: "Pune, India (On-site)", portal: "Naukri", postedAgo: "3d ago", salary: "₹12-18 LPA", match: 74, tags: ["Ansible", "Terraform", "AWS", "Python"], description: "Automation engineer focused on Ansible playbooks, Terraform modules, AWS provisioning, and Python scripting for infrastructure tasks.", url: "https://naukri.com/jobs", applied: false, saved: false },
-  { id: "lj12", title: "Cloud Native Engineer – GCP/AWS", company: "Google India", location: "Bangalore, India (Hybrid)", portal: "LinkedIn", postedAgo: "4d ago", salary: "₹35-60 LPA", match: 71, tags: ["Kubernetes", "GCP", "AWS", "Terraform"], description: "Cloud native engineering role at Google. GCP and AWS multi-cloud, Kubernetes advanced patterns, Terraform enterprise, FinOps.", url: "https://linkedin.com/jobs", applied: false, saved: false },
-];
+// Mock jobs and live pool removed. UI loads only from backend APIs.
 
 const MOCK_TASKS = [
   { id: 1, title: "Practice AWS VPC secure routing interview questions", status: "pending", task_type: "daily" },
@@ -520,36 +498,50 @@ const LiveJobFeed = ({
     setScanning(true); 
     setScanProgress(0); 
     setNewJobCount(0);
+    
+    let scanId = null;
     try {
-      const queryParam = selectedPortals.length === 1 ? `?portal=${encodeURIComponent(selectedPortals[0])}` : "";
-      await fetch(API_BASE + "/jobs/scan" + queryParam, { method: "POST" });
+      let url = API_BASE + "/scan";
+      if (selectedPortals.length === 1) {
+        url += `?portal=${encodeURIComponent(selectedPortals[0])}`;
+      }
+      
+      const res = await url.includes("?") 
+        ? await fetch(url, { method: "POST" })
+        : await fetch(url, { method: "POST" });
+        
+      if (res.ok) {
+        const data = await res.json();
+        scanId = data.scan_id;
+      } else {
+        const errData = await res.json();
+        alert(errData.detail || "Failed to start scan");
+        setScanning(false);
+        return;
+      }
     } catch (e) {
       console.error(e);
+      setScanning(false);
+      return;
+    }
+    
+    if (!scanId) {
+      setScanning(false);
+      return;
     }
     
     // Poll for portal scan progress
-    let completedCount = 0;
     const pollInterval = setInterval(async () => {
       try {
-        const res = await fetch(API_BASE + "/jobs/portals");
+        const res = await fetch(API_BASE + `/scan/status/${scanId}`);
         if (res.ok) {
           const data = await res.json();
-          setPortalsSummary(data);
+          setScanProgress(data.progress || 0);
           
-          const activeScanPortals = selectedPortals.length === 1
-            ? data.filter(p => p.portal === selectedPortals[0])
-            : data;
-            
-          const running = activeScanPortals.filter(p => p.status === "running");
-          const completed = activeScanPortals.filter(p => p.status === "success" || p.status === "failed");
+          // Refresh the portal summaries in the dashboard
+          fetchPortalsSummary();
           
-          completedCount = completed.length;
-          const totalCount = activeScanPortals.length;
-          
-          const progress = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 100;
-          setScanProgress(progress);
-          
-          if (running.length === 0) {
+          if (data.status === "completed" || data.status === "failed") {
             clearInterval(pollInterval);
             await fetchLogs();
             await fetchJobs();
@@ -557,9 +549,9 @@ const LiveJobFeed = ({
           }
         }
       } catch (err) {
-        console.error("Error polling portal statuses:", err);
+        console.error("Error polling scan status:", err);
       }
-    }, 1500);
+    }, 3000);
   };
 
   const applyToJob = async (job) => {
@@ -1954,7 +1946,7 @@ const JobTracker = ({ jobs, setJobs }) => {
         <div style={{overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
             <thead><tr style={{background:"var(--surface)"}}>{["Company","Position","Portal","Date","Status","Notes"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",color:"var(--muted)",fontWeight:500,fontSize:11,textTransform:"uppercase"}}>{h}</th>)}</tr></thead>
-            <tbody>{jobs.map((j,i)=>(
+            <tbody>{jobs.filter(j => j.applied).map((j,i)=>(
               <tr key={j.id} style={{borderTop:"1px solid var(--border)",background:i%2?"var(--surface)":"transparent"}}>
                 <td style={{padding:"10px 14px",fontWeight:600,color:"var(--text)"}}>{j.company_name}</td>
                 <td style={{padding:"10px 14px",color:"var(--muted)",fontSize:12}}>{j.position}</td>
@@ -2104,7 +2096,7 @@ export default function App() {
   const [tab, setTab] = useState("dashboard");
   const [darkMode, setDarkMode] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [jobs, setJobs] = useState(MOCK_JOBS);
+  const [jobs, setJobs] = useState([]);
   const [tasks, setTasks] = useState(MOCK_TASKS);
   const [appliedLiveIds, setAppliedLiveIds] = useState([]);
   const [notifs, setNotifs] = useState(3);
@@ -2165,24 +2157,11 @@ export default function App() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch(API_BASE + "/jobs");
+      const res = await fetch(API_BASE + "/jobs?limit=10000");
       if (res.ok) {
         const data = await res.json();
-        if (data && data.length > 0) {
-          setJobs(prev => {
-            const existingIds = new Set(prev.map(j => j.id));
-            const newJobs = data.filter(j => !existingIds.has(j.id));
-            // Update applied status for any existing matching IDs
-            const updatedPrev = prev.map(j => {
-              const matched = data.find(x => x.id === j.id);
-              if (matched) {
-                return { ...j, ...matched };
-              }
-              return j;
-            });
-            return [...newJobs, ...updatedPrev];
-          });
-        }
+        const jobsArray = data.jobs || (Array.isArray(data) ? data : []);
+        setJobs(jobsArray);
       }
     } catch (e) {
       console.error("Error fetching jobs:", e);
