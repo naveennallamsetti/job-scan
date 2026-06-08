@@ -1,0 +1,34 @@
+{
+  "linkedin": {
+    "primary": "div.job-search-card",
+    "structural": "li:has(div > a[data-tracking-control-name])"
+  },
+  "naukri": {
+    "primary": "div.srp-jobtuple-wrapper",
+    "structural": "article:has(a.title)"
+  },
+  "indeed": {
+    "primary": "td.resultContent",
+    "structural": "td:has(h2.jobTitle)"
+  },
+  "dice": {
+    "primary": "div.card",
+    "structural": "div:has(a.card-title-link)"
+  },
+  "glassdoor": {
+    "primary": "li.react-job-listing",
+    "structural": "li:has(a[data-test='job-link'])"
+  },
+  "foundit": {
+    "primary": "div.job-tittle",
+    "structural": "div:has(h3 > a)"
+  },
+  "weworkremotely": {
+    "primary": "li.feature",
+    "structural": "li:has(span.company)"
+  },
+  "cncf": {
+    "primary": "li.job-result",
+    "structural": "li:has(h3)"
+  }
+}

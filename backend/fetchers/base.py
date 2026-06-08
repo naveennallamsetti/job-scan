@@ -6,6 +6,7 @@ import hashlib
 import httpx
 from bs4 import BeautifulSoup
 from datetime import datetime
+import threading
 
 PROFILE_SKILLS = [
     "AWS", "Kubernetes", "Docker", "Jenkins", "Terraform", "Ansible", 
@@ -128,18 +129,23 @@ def http_request_with_retry(client, url, method="GET", **kwargs):
             r = client.request(method, url, **kwargs)
             if r.status_code == 200:
                 return r
-            if r.status_code == 429: # Too many requests
-                time.sleep(backoff ** (attempt + 1))
+            if r.status_code in (429, 500): # Retry on 429 and Yahoo's rate-limiting 500 error code
+                # Sleep with backoff and random jitter
+                wait_time = backoff ** (attempt + 1) + random.uniform(1.0, 3.0)
+                print(f"[RETRY] Received {r.status_code} on attempt {attempt+1}. Retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
                 continue
-        except Exception:
+        except Exception as e:
             if attempt == retries - 1:
                 raise
-            time.sleep(backoff ** (attempt + 1))
+            wait_time = backoff ** (attempt + 1) + random.uniform(1.0, 3.0)
+            print(f"[RETRY] Exception on attempt {attempt+1}: {e}. Retrying in {wait_time:.1f}s...")
+            time.sleep(wait_time)
     return None
 
 def extract_posted_ago(snippet):
     if not snippet:
-        return "Recently"
+        return None
     match = re.search(r"(\d+\s*(?:day|hour|minute|min|sec|wk|week|month)s?\s*ago)", snippet, re.IGNORECASE)
     if match:
         return match.group(1)
@@ -147,15 +153,23 @@ def extract_posted_ago(snippet):
         return "Yesterday"
     if "today" in snippet.lower():
         return "Today"
-    return "Recently"
+    return None
+
+yahoo_lock = threading.Lock()
 
 def fetch_yahoo_portal_jobs(portal_name, domain, path_filter, keywords, past_24h):
-    # Formulate Yahoo query: e.g. "site:linkedin.com/jobs/view" "DevOps Engineer"
-    query = f"site:\"{domain}/{path_filter}\" \"{keywords}\""
+    # Clean domain & query formulation to avoid 500 INKApi errors in Yahoo search:
+    # 1. Do NOT put slashes or hyphens inside the site: operator.
+    # 2. Do NOT use &btf=d date filter on Yahoo since it intermittently triggers 500 errors.
+    # 3. Clean path_filter keywords and put them inside quoted search terms.
+    query = f"site:{domain} \"{keywords}\""
+    if path_filter:
+        clean_path = path_filter.replace("/", " ").replace("-", " ").strip()
+        if clean_path:
+            query += f" \"{clean_path}\""
+            
     encoded_query = urllib.parse.quote(query)
     search_url = f"https://search.yahoo.com/search?p={encoded_query}"
-    if past_24h:
-        search_url += "&btf=d"
         
     jobs = []
     headers = {
@@ -164,8 +178,16 @@ def fetch_yahoo_portal_jobs(portal_name, domain, path_filter, keywords, past_24h
         "Upgrade-Insecure-Requests": "1"
     }
     
+    # Serialize Yahoo queries globally using a lock to prevent concurrent workers from triggering IP blocks
+    yahoo_lock.acquire()
     try:
-        with httpx.Client(headers=headers, timeout=15.0) as client:
+        with httpx.Client(headers=headers, timeout=15.0, follow_redirects=True) as client:
+            # Cookie Handshake: fetch Yahoo search homepage first to set cookies
+            try:
+                client.get("https://search.yahoo.com/")
+            except Exception:
+                pass
+            
             r = http_request_with_retry(client, search_url)
             if r and r.status_code == 200:
                 soup = BeautifulSoup(r.text, 'html.parser')
@@ -251,6 +273,8 @@ def fetch_yahoo_portal_jobs(portal_name, domain, path_filter, keywords, past_24h
                     })
     except Exception as e:
         print(f"[FETCHER] Error in fetch_yahoo_portal_jobs for {portal_name}: {e}")
+    finally:
+        yahoo_lock.release()
     return jobs
 
 def parse_posted_ago_to_utc_datetime(posted_ago):
@@ -479,7 +503,7 @@ def check_url_is_expired(url, job_dict=None):
                             
                 if real_posted:
                     print(f"[VERIFY] Extracted real posting date from {url}: '{real_posted}'")
-                    if job_dict and (not job_dict.get("posted_ago") or job_dict.get("posted_ago") in ["Recently", "time-ago"]):
+                    if job_dict and (not job_dict.get("posted_ago") or job_dict.get("posted_ago") in [None, "time-ago"]):
                         job_dict["posted_ago"] = real_posted
             elif r.status_code in [404, 410]:
                 print(f"[VERIFY] Job URL {url} returned status {r.status_code} (Not Found)")

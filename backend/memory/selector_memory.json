@@ -1,0 +1,27 @@
+{
+  "linkedin": {
+    "27c214b6825a018381fcb2f2f7bcd243c411e7896b30bf4800bd898cd7f8f2f0": {
+      "success": 3,
+      "fail": 0,
+      "zero_jobs": 0,
+      "last_seen_success": 1780884965.1920292,
+      "selector_type": "primary"
+    }
+  },
+  "naukri": {
+    "fc1fd1186c79fba3d23e3ca1e66ee6e162e33e2aa62de3f0cda561ffd0702d77": {
+      "success": 0,
+      "fail": 2,
+      "zero_jobs": 2,
+      "last_seen_success": 1780882968.782807,
+      "selector_type": "primary"
+    },
+    "8bf9729edd33cfbfcb6c0b484bfc7c340977cb5088ab560e4882324d080c4cd6": {
+      "success": 0,
+      "fail": 2,
+      "zero_jobs": 2,
+      "last_seen_success": 1780884239.8455229,
+      "selector_type": "structural"
+    }
+  }
+}

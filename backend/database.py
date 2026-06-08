@@ -16,15 +16,26 @@ def get_db_connection():
         pass
     return conn
 
-def generate_job_hash(title, company, location):
-    # Normalize title: lowercase, remove non-alphanumeric, strip whitespace
-    t = re.sub(r'[^a-zA-Z0-9]', '', str(title).lower())
-    # Normalize company: lowercase, remove non-alphanumeric, strip whitespace
-    c = re.sub(r'[^a-zA-Z0-9]', '', str(company).lower())
-    # Normalize location: lowercase, remove non-alphanumeric, strip whitespace
-    l = re.sub(r'[^a-zA-Z0-9]', '', str(location or '').lower())
+def generate_job_hash(portal, company, title, job_url):
+    import hashlib
+    import urllib.parse
     
-    hash_input = f"{t}|{c}|{l}".encode('utf-8')
+    p = str(portal or '').lower().strip()
+    c = str(company or '').lower().strip()
+    t = str(title or '').lower().strip()
+    
+    # URL Normalization
+    u = str(job_url or '').strip()
+    if u:
+        parsed = urllib.parse.urlparse(u)
+        # remove tracking params
+        qs = urllib.parse.parse_qs(parsed.query)
+        cleaned_qs = {k: v for k, v in qs.items() if not k.startswith('utm_') and k not in ['ref', 'trackingId', 'trk', 'sc.keyword', 'fromage']}
+        new_query = urllib.parse.urlencode(cleaned_qs, doseq=True)
+        # lowercase host, drop fragment
+        u = urllib.parse.urlunparse((parsed.scheme, (parsed.netloc or '').lower(), parsed.path, parsed.params, new_query, ''))
+    
+    hash_input = f"{p}|{c}|{t}|{u}".encode('utf-8')
     return hashlib.sha256(hash_input).hexdigest()
 
 def create_jobs_table(cursor):
@@ -54,6 +65,9 @@ def create_jobs_table(cursor):
         job_hash TEXT,
         status TEXT DEFAULT 'active',
         resume_hash TEXT,
+        date_verified INTEGER DEFAULT 0,
+        date_confidence REAL DEFAULT 0,
+        date_source TEXT,
         UNIQUE(job_url),
         UNIQUE(job_hash)
     )
@@ -101,7 +115,7 @@ def init_db():
         cols = [r[1] for r in cursor.fetchall()]
         
         need_migration = False
-        required_cols = ["job_hash", "first_seen", "last_seen", "status", "resume_hash"]
+        required_cols = ["job_hash", "first_seen", "last_seen", "status", "resume_hash", "date_verified"]
         for rc in required_cols:
             if rc not in cols:
                 need_migration = True
@@ -134,9 +148,9 @@ def init_db():
                         id, title, company, location, portal, posted_ago, salary, match_score, 
                         tags, description, url, applied, saved, experience_required, 
                         cover_letter, resume_customized, created_at, first_seen, last_seen, 
-                        posted_date, job_url, job_hash, status, resume_hash
+                        posted_date, job_url, job_hash, status, resume_hash, date_verified, date_confidence, date_source, age_days, freshness_score
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         r_dict.get("id"),
                         r_dict.get("title"),
@@ -157,11 +171,14 @@ def init_db():
                         created,
                         first,
                         last,
-                        r_dict.get("posted_date") or r_dict.get("created_at"),
+                        r_dict.get("posted_date"),
                         r_dict.get("job_url") or r_dict.get("url"),
                         h,
                         status,
-                        r_dict.get("resume_hash")
+                        r_dict.get("resume_hash"),
+                        r_dict.get("date_verified", 0),
+                        r_dict.get("date_confidence", 0),
+                        r_dict.get("date_source", "")
                     ))
                 except Exception as e:
                     print(f"[DATABASE] Migration row error: {e}")
@@ -180,6 +197,19 @@ def init_db():
         type TEXT,
         description TEXT,
         status TEXT
+    )
+    """)
+    
+    # Create portal_health table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS portal_health (
+        portal_name TEXT PRIMARY KEY,
+        last_success TEXT,
+        last_failure TEXT,
+        jobs_found INTEGER DEFAULT 0,
+        jobs_saved INTEGER DEFAULT 0,
+        jobs_rejected INTEGER DEFAULT 0,
+        success_rate REAL DEFAULT 0.0
     )
     """)
     
@@ -303,7 +333,7 @@ def get_logs(limit=30):
 def get_all_jobs():
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM jobs ORDER BY match_score DESC")
+    cursor.execute("SELECT * FROM jobs WHERE status='active' AND age_days <= 1 ORDER BY posted_date DESC")
     rows = cursor.fetchall()
     conn.close()
     
@@ -326,7 +356,11 @@ def get_all_jobs():
         except:
             job["applied_date"] = datetime.now().strftime("%Y-%m-%d")
             
-        job["status"] = "Applied"
+        db_status = job.get("status") or "active"
+        if job["applied"] and db_status == "active":
+            job["status"] = "Applied"
+        else:
+            job["status"] = db_status
         job["notes"] = f"Auto-applied. Match Score: {job['match']}%" if job["applied"] else ""
         
         if job["tags"]:
@@ -351,11 +385,33 @@ def save_job(job_data, conn=None):
     posted_date = job_data.get("posted_date")
     job_url = job_data.get("job_url") or job_data.get("url") or None
     
+    if not posted_date or not isinstance(posted_date, str):
+        if should_close: conn.close()
+        return "rejected_missing_date"
+        
+    if job_data.get("date_verified") != 1:
+        if should_close: conn.close()
+        return "rejected_unverified_job"
+
+    from datetime import timedelta
+    try:
+        dt = datetime.fromisoformat(posted_date.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt < datetime.now(timezone.utc) - timedelta(hours=24):
+            if should_close: conn.close()
+            return "rejected_old_job"
+    except Exception:
+        if should_close: conn.close()
+        return "rejected_missing_date"
+
     # Generate job hash
     job_hash = job_data.get("job_hash")
     if not job_hash:
-        job_hash = generate_job_hash(job_data["title"], job_data["company"], job_data.get("location", ""))
+        job_hash = generate_job_hash(job_data.get("portal"), job_data["company"], job_data["title"], job_url)
         job_data["job_hash"] = job_hash
+    age_days = job_data.get("age_days", 0)
+    freshness_score = job_data.get("freshness_score", 0)
         
     resume_content = job_data.get("resume_customized") or ""
     res_hash = hashlib.sha256(resume_content.encode('utf-8')).hexdigest() if resume_content else ""
@@ -419,7 +475,12 @@ def save_job(job_data, conn=None):
                 resume_hash = ?,
                 cover_letter = ?,
                 resume_customized = ?,
-                status = 'active'
+                status = 'active',
+                date_verified = ?,
+                date_confidence = ?,
+                date_source = ?,
+                age_days = ?,
+                freshness_score = ?
             WHERE id = ?
             """, (
                 job_data["posted_ago"],
@@ -432,6 +493,11 @@ def save_job(job_data, conn=None):
                 res_hash,
                 cl,
                 res,
+                job_data.get("date_verified", 1),
+                job_data.get("date_confidence", 1.0),
+                job_data.get("date_source", ""),
+                job_data.get("age_days", 0),
+                job_data.get("freshness_score", 0),
                 existing_id
             ))
             if should_close:
@@ -456,9 +522,9 @@ def save_job(job_data, conn=None):
                 id, title, company, location, portal, posted_ago, salary, match_score, 
                 tags, description, url, applied, saved, experience_required, 
                 cover_letter, resume_customized, created_at, first_seen, last_seen, 
-                posted_date, job_url, job_hash, status, resume_hash
+                posted_date, job_url, job_hash, status, resume_hash, date_verified, date_confidence, date_source, age_days, freshness_score
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job_data["id"],
                 job_data["title"],
@@ -483,7 +549,12 @@ def save_job(job_data, conn=None):
                 job_url,
                 job_hash,
                 "active",
-                res_hash
+                res_hash,
+                job_data.get("date_verified", 1),
+                job_data.get("date_confidence", 1.0),
+                job_data.get("date_source", ""),
+                job_data.get("age_days", 0),
+                job_data.get("freshness_score", 0)
             ))
             if should_close:
                 conn.commit()
@@ -562,7 +633,7 @@ def get_portal_summaries():
         LEFT JOIN (
             SELECT portal, COUNT(*) as cnt 
             FROM jobs 
-            WHERE status = 'active'
+            WHERE status = 'active' AND date_verified=1 AND datetime(posted_date) >= datetime('now','-24 hours')
             GROUP BY portal
         ) j ON ps.portal = j.portal
         """)
@@ -619,5 +690,70 @@ def get_scan_history(limit=10):
     except Exception as e:
         print(f"[DATABASE] Error getting scan history: {e}")
         return []
+    finally:
+        conn.close()
+
+def purge_old_jobs():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Expire older than 24h explicitly if age_days is > 1
+        cursor.execute("UPDATE jobs SET status = 'expired' WHERE status = 'active' AND age_days > 1")
+        
+        # Archive > 7 days
+        cursor.execute("UPDATE jobs SET status = 'archived' WHERE status = 'expired' AND age_days > 7")
+        archived = cursor.rowcount
+        
+        # Delete > 30 days
+        cursor.execute("DELETE FROM jobs WHERE age_days > 30")
+        deleted = cursor.rowcount
+        
+        conn.commit()
+    except Exception as e:
+        print(f"[CLEANUP] Error: {e}")
+    finally:
+        conn.close()
+
+def update_portal_health(portal_name, status, jobs_found=0, jobs_saved=0, jobs_rejected=0):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM portal_health WHERE portal_name = ?", (portal_name,))
+        row = cursor.fetchone()
+        now_str = datetime.now().isoformat()
+        
+        if row:
+            total_found = row["jobs_found"] + jobs_found
+            total_saved = row["jobs_saved"] + jobs_saved
+            total_rejected = row["jobs_rejected"] + jobs_rejected
+            
+            last_success = now_str if status == 'success' else row["last_success"]
+            last_failure = now_str if status == 'failed' else row["last_failure"]
+            
+            success_rate = 0.0
+            if total_found > 0:
+                success_rate = round((total_saved / total_found) * 100, 2)
+                
+            cursor.execute("""
+                UPDATE portal_health SET
+                last_success = ?, last_failure = ?, jobs_found = ?, jobs_saved = ?, jobs_rejected = ?, success_rate = ?
+                WHERE portal_name = ?
+            """, (last_success, last_failure, total_found, total_saved, total_rejected, success_rate, portal_name))
+        else:
+            success_rate = 0.0
+            if jobs_found > 0:
+                success_rate = round((jobs_saved / jobs_found) * 100, 2)
+            
+            last_success = now_str if status == 'success' else None
+            last_failure = now_str if status == 'failed' else None
+            
+            cursor.execute("""
+                INSERT INTO portal_health (portal_name, last_success, last_failure, jobs_found, jobs_saved, jobs_rejected, success_rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (portal_name, last_success, last_failure, jobs_found, jobs_saved, jobs_rejected, success_rate))
+            
+        conn.commit()
+    except Exception as e:
+        print(f"[HEALTH] Error updating portal health: {e}")
     finally:
         conn.close()

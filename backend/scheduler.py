@@ -164,7 +164,7 @@ def run_auto_apply():
     
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM jobs WHERE applied = 0 AND status = 'active' AND match_score >= 85 ORDER BY match_score DESC LIMIT 1")
+    cursor.execute("SELECT * FROM jobs WHERE applied = 0 AND status = 'active' AND date_verified = 1 AND datetime(posted_date) >= datetime('now','-24 hours') AND match_score >= 85 ORDER BY match_score DESC LIMIT 1")
     row = cursor.fetchone()
     conn.close()
     

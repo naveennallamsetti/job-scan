@@ -197,10 +197,10 @@ const PORTALS_BY_CATEGORY = {
   ]
 };
 
-const getPostAgeInDays = (postedAgo, createdAtStr) => {
-  if (!postedAgo) return 0;
+const getPostAgeInDays = (posted_date, createdAtStr) => {
+  if (!posted_date) return 0;
   // Normalize "a " or "an " to "1 " to handle "a day ago", "an hour ago" etc.
-  const text = postedAgo.toLowerCase().trim().replace(/\b(a|an)\b/g, "1");
+  const text = posted_date.toLowerCase().trim().replace(/\b(a|an)\b/g, "1");
   
   if (text === "recently" || text === "time-ago") {
     return 5;
@@ -223,7 +223,7 @@ const getPostAgeInDays = (postedAgo, createdAtStr) => {
   }
   
   // Try to parse absolute date strings (e.g. "Apr 13, 2026")
-  const parsedDate = Date.parse(postedAgo);
+  const parsedDate = Date.parse(posted_date);
   if (!isNaN(parsedDate)) {
     const diffMs = new Date() - new Date(parsedDate);
     const ageInDays = diffMs / (1000 * 60 * 60 * 24);
@@ -390,7 +390,7 @@ const LiveJobFeed = ({
       
       // Time filter
       if (fTime !== "all") {
-        const postAgeInDays = getPostAgeInDays(j.postedAgo || j.posted_ago, j.created_at);
+        const postAgeInDays = getPostAgeInDays(j.posted_date || j.posted_ago, j.created_at);
         if (fTime === "1" && postAgeInDays > 1) return false;
         if (fTime === "3" && postAgeInDays > 3) return false;
         if (fTime === "7" && postAgeInDays > 7) return false;
@@ -473,7 +473,7 @@ const LiveJobFeed = ({
     .filter(j => j.match >= minMatch)
     .filter(j => {
       if (timeFilter === "all") return true;
-      const postAgeInDays = getPostAgeInDays(j.postedAgo || j.posted_ago, j.created_at);
+      const postAgeInDays = getPostAgeInDays(j.posted_date || j.posted_ago, j.created_at);
       if (timeFilter === "1") return postAgeInDays <= 1;
       if (timeFilter === "3") return postAgeInDays <= 3;
       if (timeFilter === "7") return postAgeInDays <= 7;
@@ -1296,7 +1296,7 @@ const LiveJobFeed = ({
               const isApplied = job.applied || appliedIds.includes(job.id);
               const isSaved = savedIds.includes(job.id);
               const pm = getPortalMeta(job.portal);
-              const isNew = job.postedAgo === "Just now";
+              const isNew = job.posted_date && !isNaN(new Date(job.posted_date).getTime()) && (new Date() - new Date(job.posted_date)) < 3600000; // < 1 hour
               return (
                 <div key={job.id} onClick={() => setSelectedJob(job)} style={{ background: selectedJob?.id===job.id ? "#8B5CF610" : "var(--card-bg)", border:`1px solid ${selectedJob?.id===job.id ? "#8B5CF666":"var(--border)"}`, borderRadius:12, padding:"13px 15px", cursor:"pointer", transition:"all 0.15s", opacity: isApplied ? 0.75 : 1 }}>
                   <div style={{ display:"flex", alignItems:"flex-start", gap:10 }}>
@@ -1318,7 +1318,9 @@ const LiveJobFeed = ({
                       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                           <span style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:pm.bg, color:pm.color, border:`1px solid ${pm.color}33` }}>{job.portal}</span>
-                          <span style={{ fontSize:10, color:"var(--muted)" }}>{job.postedAgo}</span>
+                          <span style={{ fontSize:10, color:"var(--muted)" }}>
+      {job.posted_ago ? `Posted: ${job.posted_ago}` : ""}
+    </span>
                           <span style={{ fontSize:10, color:"#4ade80", fontWeight:600 }}>{job.salary}</span>
                         </div>
                         <div style={{ display:"flex", gap:6 }} onClick={e=>e.stopPropagation()}>
@@ -1362,7 +1364,9 @@ const LiveJobFeed = ({
               <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:12 }}>
                 <span style={{ fontSize:11, padding:"3px 10px", borderRadius:99, background:getPortalMeta(selectedJob.portal).bg, color:getPortalMeta(selectedJob.portal).color, border:`1px solid ${getPortalMeta(selectedJob.portal).color}44` }}>{selectedJob.portal}</span>
                 <span style={{ fontSize:11, padding:"3px 10px", borderRadius:99, background:"#4ade8018", color:"#4ade80", border:"1px solid #4ade8033" }}>{selectedJob.salary}</span>
-                <span style={{ fontSize:11, padding:"3px 10px", borderRadius:99, background:"var(--surface)", color:"var(--muted)", border:"1px solid var(--border)" }}>{selectedJob.postedAgo}</span>
+                <span style={{ fontSize:11, padding:"3px 10px", borderRadius:99, background:"var(--surface)", color:"var(--muted)", border:"1px solid var(--border)" }}>
+      {selectedJob.posted_ago ? `Posted: ${selectedJob.posted_ago}` : ""}
+    </span>
               </div>
               <div style={{ display:"flex", gap:4, marginBottom:10, borderBottom:"1px solid var(--border)", paddingBottom:6 }}>
                 {[["desc","JD Description"],["resume","Tailored Resume"],["letter","Cover Letter"]].map(([t,lbl])=>(
@@ -1481,7 +1485,7 @@ const Dashboard = ({ jobs, tasks, liveJobs, onApply, appliedIds, systemStatus, p
       </div>
     )}
     <div style={{ display:"flex", flexWrap:"wrap", gap:12, marginBottom:24 }}>
-      <SparkCard label="Total Applied" value={jobs.length + appliedIds.length} delta={18} data={[3,5,4,7,9,jobs.length+appliedIds.length]} color="#8B5CF6"/>
+      <SparkCard label="Total Applied" value={jobs.filter(j => j.applied).length + appliedIds.length} delta={18} data={[3,5,4,7,9,jobs.filter(j => j.applied).length+appliedIds.length]} color="#8B5CF6"/>
       <SparkCard label="This Month" value={3+appliedIds.length} delta={50} data={[1,1,2,2,2,3+appliedIds.length]} color="#06b6d4"/>
       <SparkCard label="Live Jobs Found" value={liveJobs} delta={12} data={[4,6,8,9,10,liveJobs]} color="#f59e0b"/>
       <SparkCard label="Prep Mastery" value="72%" delta={8} data={[55,60,62,66,70,72]} color="#4ade80"/>
@@ -2132,7 +2136,7 @@ export default function App() {
       if (!(j.match >= minMatch)) return false;
       
       if (timeFilter !== "all") {
-        const postAgeInDays = getPostAgeInDays(j.postedAgo || j.posted_ago, j.created_at);
+        const postAgeInDays = getPostAgeInDays(j.posted_date || j.posted_ago, j.created_at);
         if (timeFilter === "1" && postAgeInDays > 1) return false;
         if (timeFilter === "3" && postAgeInDays > 3) return false;
         if (timeFilter === "7" && postAgeInDays > 7) return false;

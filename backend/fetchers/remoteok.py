@@ -28,8 +28,8 @@ def fetch_jobs(keywords, past_24h=True):
                     
                     tags = item.get("tags", [])
                     pub_date_str = item.get("date", "")
-                    posted_ago = "Recently"
-                    posted_date_dt = datetime.now(timezone.utc)
+                    posted_ago = None
+                    posted_date_dt = None
                     
                     if pub_date_str:
                         try:

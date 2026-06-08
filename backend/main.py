@@ -29,7 +29,41 @@ class StatusUpdate(BaseModel):
 
 @app.on_event("startup")
 def startup_event():
+    import logging
+    from backend.database import get_db_connection, init_db, purge_old_jobs
+    
     init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # 1. Recalculate age_days based on posted_date if we had robust backward compatibility here, but purge_old_jobs handles cleanup
+    purge_old_jobs()
+    
+    cursor.execute("SELECT COUNT(*) FROM jobs")
+    total_jobs = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE age_days <= 1 AND status='active'")
+    fresh_jobs = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE status='archived'")
+    archived = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    logging.info(f"
+[AUDIT]
+Total Jobs: {total_jobs}
+Fresh Jobs: {fresh_jobs}
+Archived: {archived}
+")
+    
+    logging.info(f"
+[AUDIT]
+Total Jobs: {total_jobs}
+Fresh Jobs: {fresh_jobs}
+Archived: {archived}
+")
+        
     start_scheduler()
     add_log("system", "Production Job Monitoring Agent Core Online.", "success")
 
@@ -81,8 +115,8 @@ def get_jobs_list(
     offset = (page - 1) * limit
     jobs = get_all_jobs()
     
-    # Filter only 'active' status jobs
-    filtered = [j for j in jobs if j.get("status") == "active"]
+    # Filter out 'expired' status jobs
+    filtered = [j for j in jobs if j.get("status") != "expired"]
     
     if portal:
         portal_list = [p.strip() for p in portal.split(",") if p.strip()]
@@ -114,7 +148,7 @@ def get_recent_jobs_list(page: int = 1, limit: int = 50):
     now_dt = datetime.now()
     recent = []
     for j in jobs:
-        if j.get("status") != "active":
+        if j.get("status") == "expired":
             continue
         fs = j.get("first_seen")
         if fs:
@@ -147,7 +181,7 @@ def get_searched_jobs(
     offset = (page - 1) * limit
     jobs = get_all_jobs()
     
-    filtered = [j for j in jobs if j.get("status") == "active"]
+    filtered = [j for j in jobs if j.get("status") != "expired"]
     
     if q:
         query = q.lower().strip()
@@ -178,13 +212,13 @@ def get_jobs_dashboard_stats():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'active'")
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'active' AND date_verified=1 AND datetime(posted_date) >= datetime('now','-24 hours')")
     total_active = cursor.fetchone()[0]
     
-    cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'expired'")
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'expired' OR datetime(posted_date) < datetime('now','-24 hours')")
     total_expired = cursor.fetchone()[0]
     
-    cursor.execute("SELECT portal, COUNT(*) FROM jobs WHERE status = 'active' GROUP BY portal")
+    cursor.execute("SELECT portal, COUNT(*) FROM jobs WHERE status = 'active' AND date_verified=1 AND datetime(posted_date) >= datetime('now','-24 hours') GROUP BY portal")
     portal_counts = {r[0]: r[1] for r in cursor.fetchall()}
     
     cursor.execute("""
@@ -194,7 +228,7 @@ def get_jobs_dashboard_stats():
             SUM(CASE WHEN match_score >= 70 AND match_score < 80 THEN 1 ELSE 0 END) as range_70_79,
             SUM(CASE WHEN match_score < 70 THEN 1 ELSE 0 END) as range_60_69
         FROM jobs 
-        WHERE status = 'active'
+        WHERE status = 'active' AND date_verified=1 AND datetime(posted_date) >= datetime('now','-24 hours')
     """)
     dist_row = cursor.fetchone()
     match_distribution = {
@@ -290,6 +324,94 @@ def trigger_manual_apply(job_id: str, background_tasks: BackgroundTasks):
 def toggle_job_save(job_id: str, update: StatusUpdate):
     update_job_status(job_id, "saved", update.value)
     return {"message": "Job save state updated."}
+
+@app.get("/api/debug/raw-jobs")
+def debug_raw_jobs():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT portal, COUNT(*) as cnt FROM jobs GROUP BY portal")
+    rows = cursor.fetchall()
+    conn.close()
+    return {r["portal"]: r["cnt"] for r in rows}
+
+@app.get("/api/debug/db-count")
+def debug_db_count():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status")
+    rows = cursor.fetchall()
+    conn.close()
+    return {r["status"]: r["cnt"] for r in rows}
+
+@app.get("/api/debug/portal-results")
+def debug_portal_results():
+    return get_portal_summaries()
+
+@app.get("/api/debug/portal-health")
+def get_portal_health_api():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM portal_health")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/debug/stale-jobs")
+def get_stale_jobs():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, posted_date, status FROM jobs WHERE datetime(posted_date) < datetime('now','-24 hours')")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/debug/date-audit")
+def date_audit_endpoint():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) FROM jobs")
+    total = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE datetime(posted_date) >= datetime('now','-24 hours')")
+    fresh = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE datetime(posted_date) < datetime('now','-24 hours')")
+    stale = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE posted_date IS NULL OR posted_date = ''")
+    missing = cursor.fetchone()[0]
+    
+    conn.close()
+    return {
+        "total_jobs": total,
+        "fresh_jobs": fresh,
+        "stale_jobs": stale,
+        "missing_dates": missing
+    }
+
+
+@app.get("/api/debug/date-validation")
+def date_validation_endpoint():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE date_verified = 1")
+    checked = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE posted_date IS NULL")
+    missing = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'expired' OR datetime(posted_date) < datetime('now','-24 hours')")
+    rejected = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'active' AND datetime(posted_date) >= datetime('now','-24 hours')")
+    saved = cursor.fetchone()[0]
+    conn.close()
+    return {
+        "jobs_checked": checked + rejected + missing,
+        "missing_dates": missing,
+        "rejected_old_jobs": rejected,
+        "saved_jobs": saved
+    }
 
 @app.get("/api/status")
 def get_scheduler_status():
